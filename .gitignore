@@ -1,2 +1,7 @@
-TOKEN=your_new_token_here
-CHANNEL_ID=1370780436862730260
+# Secrets
+.env
+
+# System files
+__pycache__/
+*.pyc
+*.pem
