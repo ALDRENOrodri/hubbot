@@ -1,7 +1,1 @@
-# Secrets
-.env
 
-# System files
-__pycache__/
-*.pyc
-*.pem
