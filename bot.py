@@ -9,6 +9,8 @@ import sqlite3
 from pathlib import Path
 import git
 import subprocess
+import importlib
+import sys
 
 # Load environment variables
 load_dotenv()
@@ -22,11 +24,12 @@ intents.members = True
 bot = commands.Bot(command_prefix="!", intents=intents)
 
 # Constants
-COOLDOWN_DB = "/home/ubuntu/discord-bot/portfolio_cooldowns.db"
+COOLDOWN_DB = "/home/ubuntu/hubbot/portfolio_cooldowns.db"  # Changed path to hubbot
 COOLDOWN_HOURS = 72
 PORTFOLIO_FORUM_CHANNEL_ID = int(os.getenv('CHANNEL_ID'))
 YOUR_SERVER_ID = int(os.getenv('SERVER_ID'))
 LOG_CHANNEL_ID = int(os.getenv('LOG_CHANNEL_ID'))
+GITHUB_REPO = "https://github.com/ALDRENOrodri/hubbot.git"  # Your repo
 
 # Database setup
 def setup_database():
@@ -72,15 +75,18 @@ class CooldownManager:
 
 class UpdateManager:
     def __init__(self):
+        self.repo_path = "/home/ubuntu/hubbot"  # Changed to hubbot
         try:
-            self.repo = git.Repo("/home/ubuntu/discord-bot")
+            self.repo = git.Repo(self.repo_path)
             self.origin = self.repo.remote("origin")
         except:
             self.init_repo()
             
     def init_repo(self):
-        repo = git.Repo.init("/home/ubuntu/discord-bot")
-        origin = repo.create_remote("origin", "https://github.com/ALDRENOrodri/hubbot.git")
+        if not os.path.exists(self.repo_path):
+            os.makedirs(self.repo_path)
+        repo = git.Repo.init(self.repo_path)
+        origin = repo.create_remote("origin", GITHUB_REPO)
         origin.fetch()
         origin.pull("main")
         self.repo = repo
@@ -107,10 +113,12 @@ bot.updater = UpdateManager()
 @commands.is_owner()
 async def reload(ctx):
     """Hot-reload the bot"""
-    await ctx.send("♻️ Reloading extensions...")
-    for ext in list(bot.extensions.keys()):
-        await bot.reload_extension(ext)
-    await ctx.send("✅ Reload complete!")
+    try:
+        # Reload the main module
+        importlib.reload(sys.modules['__main__'])
+        await ctx.send("✅ Successfully reloaded bot.py!")
+    except Exception as e:
+        await ctx.send(f"❌ Reload failed: {str(e)}")
 
 async def update_task():
     while True:
@@ -125,34 +133,22 @@ async def update_task():
                 )
                 await log_channel.send(embed=embed)
             # Hot-reload
-            for ext in list(bot.extensions.keys()):
-                await bot.reload_extension(ext)
+            importlib.reload(sys.modules['__main__'])
 
 @bot.event
 async def on_ready():
+    print(f"Logged in as {bot.user} (ID: {bot.user.id})")
     bot.loop.create_task(update_task())
-    # ... [Rest of your existing on_ready] ...
-
-@bot.tree.command(name="force_update")
-@commands.has_permissions(administrator=True)
-async def force_update(interaction: discord.Interaction):
-    """Manually trigger a full update"""
-    await interaction.response.defer(ephemeral=True)
+    bot.cooldowns.clear_expired_cooldowns()
     
-    if await bot.updater.hard_reset():
-        log_channel = bot.get_channel(LOG_CHANNEL_ID)
-        if log_channel:
-            embed = discord.Embed(
-                title="🔁 Manual Update",
-                description=f"Triggered by {interaction.user.mention}\n{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}",
-                color=0x7289DA
-            )
-            await log_channel.send(embed=embed)
-        
-        await interaction.followup.send("✅ Update complete! Changes are live.", ephemeral=True)
-    else:
-        await interaction.followup.send("❌ Update failed. Check logs.", ephemeral=True)
+    try:
+        synced = await bot.tree.sync()
+        print(f"Synced {len(synced)} commands")
+    except Exception as e:
+        print(f"Error syncing commands: {e}")
 
-# ... [Keep all other existing commands] ...
+    bot.add_view(PortfolioView())
+
+# ... [Keep all other existing commands and bot.run()] ...
 
 bot.run(os.getenv('DISCORD_TOKEN'))
