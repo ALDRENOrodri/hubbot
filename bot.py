@@ -80,7 +80,7 @@ class UpdateManager:
             
     def init_repo(self):
         repo = git.Repo.init("/home/ubuntu/discord-bot")
-        origin = repo.create_remote("origin", "https://github.com/YOUR_USERNAME/YOUR_REPO.git")
+        origin = repo.create_remote("origin", "https://github.com/ALDRENOrodri/hubbot.git")
         origin.fetch()
         origin.pull("main")
         self.repo = repo
