@@ -17,8 +17,8 @@ intents.members = True
 
 bot = commands.Bot(command_prefix="!", intents=intents)
 
-# Cooldown tracker
-bot.user_cooldowns = {}  # Format: {user_id: {"last_submit": timestamp, "thread_id": thread_id}}
+# Cooldown tracker - Format: {user_id: {"last_submit": timestamp, "thread_id": thread_id}}
+bot.user_cooldowns = {}
 
 # Get values from environment variables
 PORTFOLIO_FORUM_CHANNEL_ID = int(os.getenv('CHANNEL_ID'))
@@ -57,17 +57,7 @@ class PortfolioForm(Modal, title="Submit Your Portfolio"):
     )
     
     async def on_submit(self, interaction: discord.Interaction):
-        # Check cooldown
-        now = datetime.now()
-        user_data = bot.user_cooldowns.get(interaction.user.id, {})
-        
-        if user_data and (now - user_data["last_submit"]).total_seconds() < 300:  # 5 minutes
-            remaining = 300 - (now - user_data["last_submit"]).total_seconds()
-            return await interaction.response.send_message(
-                f"⏳ Please wait {int(remaining // 60)}m {int(remaining % 60)}s before updating your portfolio again!",
-                ephemeral=True
-            )
-
+        # Process form submission (same as before)
         embed = discord.Embed(
             title=f"{interaction.user.display_name}'s Portfolio",
             color=discord.Color.blue()
@@ -88,6 +78,7 @@ class PortfolioForm(Modal, title="Submit Your Portfolio"):
             return await interaction.response.send_message("❌ Error: Forum channel not found!", ephemeral=True)
 
         # Delete old thread if exists
+        user_data = bot.user_cooldowns.get(interaction.user.id, {})
         if user_data and "thread_id" in user_data:
             try:
                 old_thread = await forum_channel.fetch_thread(user_data["thread_id"])
@@ -103,7 +94,7 @@ class PortfolioForm(Modal, title="Submit Your Portfolio"):
 
         # Update cooldown tracker
         bot.user_cooldowns[interaction.user.id] = {
-            "last_submit": now,
+            "last_submit": datetime.now(),
             "thread_id": thread.thread.id
         }
 
@@ -128,6 +119,18 @@ class PortfolioView(View):
     
     async def interaction_check(self, interaction: discord.Interaction):
         if interaction.data["custom_id"] == "submit_portfolio":
+            # Check cooldown BEFORE showing form
+            now = datetime.now()
+            user_data = bot.user_cooldowns.get(interaction.user.id, {})
+            
+            if user_data and (now - user_data["last_submit"]).total_seconds() < 300:
+                remaining = 300 - (now - user_data["last_submit"]).total_seconds()
+                await interaction.response.send_message(
+                    f"⏳ Please wait {int(remaining // 60)}m {int(remaining % 60)}s before updating your portfolio again!",
+                    ephemeral=True
+                )
+                return False
+            
             await interaction.response.send_modal(PortfolioForm())
             return False
         return True
