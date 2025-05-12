@@ -234,7 +234,7 @@ async def create_portfolio_post(interaction: discord.Interaction):
         return
     
     embed = discord.Embed(
-        title="Start Here",
+        title="Start Here YO",
         description="Click the button below to submit your portfolio.",
         color=discord.Color.green()
     )
