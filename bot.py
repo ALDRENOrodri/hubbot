@@ -9,12 +9,22 @@ import sqlite3
 from pathlib import Path
 import git
 import subprocess
-import importlib
+import signal
 import sys
+import importlib
 
 # Load environment variables
 load_dotenv()
 
+# Configuration
+COOLDOWN_HOURS = 72
+PORTFOLIO_FORUM_CHANNEL_ID = int(os.getenv('CHANNEL_ID'))
+YOUR_SERVER_ID = int(os.getenv('SERVER_ID'))
+LOG_CHANNEL_ID = int(os.getenv('LOG_CHANNEL_ID', 0)) or None
+GITHUB_REPO = "https://github.com/ALDRENOrodri/hubbot.git"
+BOT_DIR = "/home/ubuntu/hubbot"
+
+# Initialize bot
 intents = discord.Intents.default()
 intents.messages = True
 intents.message_content = True
@@ -23,18 +33,11 @@ intents.members = True
 
 bot = commands.Bot(command_prefix="!", intents=intents)
 
-# Constants
-COOLDOWN_DB = "/home/ubuntu/hubbot/portfolio_cooldowns.db"  # Changed path to hubbot
-COOLDOWN_HOURS = 72
-PORTFOLIO_FORUM_CHANNEL_ID = int(os.getenv('CHANNEL_ID'))
-YOUR_SERVER_ID = int(os.getenv('SERVER_ID'))
-LOG_CHANNEL_ID = int(os.getenv('LOG_CHANNEL_ID'))
-GITHUB_REPO = "https://github.com/ALDRENOrodri/hubbot.git"  # Your repo
-
 # Database setup
 def setup_database():
-    Path(COOLDOWN_DB).parent.mkdir(exist_ok=True)
-    conn = sqlite3.connect(COOLDOWN_DB)
+    db_path = f"{BOT_DIR}/portfolio_cooldowns.db"
+    Path(db_path).parent.mkdir(exist_ok=True)
+    conn = sqlite3.connect(db_path)
     c = conn.cursor()
     c.execute("""
         CREATE TABLE IF NOT EXISTS cooldowns (
@@ -50,7 +53,8 @@ setup_database()
 
 class CooldownManager:
     def __init__(self):
-        self.conn = sqlite3.connect(COOLDOWN_DB, check_same_thread=False)
+        self.conn = sqlite3.connect(f"{BOT_DIR}/portfolio_cooldowns.db", 
+                                  check_same_thread=False)
         self.conn.row_factory = sqlite3.Row
     
     def get_cooldown(self, user_id):
@@ -75,7 +79,7 @@ class CooldownManager:
 
 class UpdateManager:
     def __init__(self):
-        self.repo_path = "/home/ubuntu/hubbot"  # Changed to hubbot
+        self.repo_path = BOT_DIR
         try:
             self.repo = git.Repo(self.repo_path)
             self.origin = self.repo.remote("origin")
@@ -94,61 +98,105 @@ class UpdateManager:
     
     async def hard_reset(self):
         try:
+            self.origin.fetch()
             self.repo.git.reset("--hard", "origin/main")
             self.repo.git.clean("-fd")
-            # Reinstall dependencies
-            subprocess.run(["python3", "-m", "pip", "install", "-r", "requirements.txt"], check=True)
+            subprocess.run(["python3", "-m", "pip", "install", "-r", "requirements.txt"], 
+                          check=True, cwd=self.repo_path)
             return True
         except Exception as e:
-            print(f"Hard reset failed: {str(e)}")
+            print(f"Update failed: {str(e)}")
             return False
 
 # Initialize managers
 bot.cooldowns = CooldownManager()
 bot.updater = UpdateManager()
 
-# ... [Keep all your existing PortfolioForm, PortfolioView classes] ...
+# Shutdown handler
+def handle_shutdown():
+    print("\n🛑 Received shutdown signal")
+    if bot.is_closed():
+        os._exit(0)
+    asyncio.create_task(bot.close())
 
+signal.signal(signal.SIGTERM, lambda *_: handle_shutdown())
+signal.signal(signal.SIGINT, lambda *_: handle_shutdown())
+
+# Portfolio form and view classes (keep your existing implementations)
+class PortfolioForm(Modal, title="Submit Your Portfolio"):
+    # ... [your existing form code] ...
+
+class PortfolioView(View):
+    # ... [your existing view code] ...
+
+# Command registration
 @bot.command()
 @commands.is_owner()
 async def reload(ctx):
     """Hot-reload the bot"""
     try:
-        # Reload the main module
         importlib.reload(sys.modules['__main__'])
-        await ctx.send("✅ Successfully reloaded bot.py!")
+        await ctx.send("✅ Bot reloaded successfully!")
     except Exception as e:
         await ctx.send(f"❌ Reload failed: {str(e)}")
 
-async def update_task():
-    while True:
-        await asyncio.sleep(3600)  # Hourly checks
-        if await bot.updater.hard_reset():
-            log_channel = bot.get_channel(LOG_CHANNEL_ID)
-            if log_channel:
-                embed = discord.Embed(
-                    title="🔄 Auto-Update Complete",
-                    description=f"Synced at {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}",
-                    color=0x00ff00
+@bot.tree.command(
+    name="force_update",
+    description="Manually trigger a GitHub sync",
+    guild=discord.Object(id=YOUR_SERVER_ID))
+@commands.has_permissions(administrator=True)
+async def force_update(interaction: discord.Interaction):
+    await interaction.response.defer(ephemeral=True)
+    if await bot.updater.hard_reset():
+        if LOG_CHANNEL_ID:
+            channel = bot.get_channel(LOG_CHANNEL_ID)
+            if channel:
+                await channel.send(
+                    f"♻️ Manual update by {interaction.user.mention} at "
+                    f"{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
                 )
-                await log_channel.send(embed=embed)
-            # Hot-reload
-            importlib.reload(sys.modules['__main__'])
+        await interaction.followup.send("✅ Update complete!", ephemeral=True)
+    else:
+        await interaction.followup.send("❌ Update failed", ephemeral=True)
 
+# Core events
 @bot.event
 async def on_ready():
-    print(f"Logged in as {bot.user} (ID: {bot.user.id})")
-    bot.loop.create_task(update_task())
-    bot.cooldowns.clear_expired_cooldowns()
+    print(f"\n✅ Logged in as {bot.user}")
+    print("="*50)
     
-    try:
-        synced = await bot.tree.sync()
-        print(f"Synced {len(synced)} commands")
-    except Exception as e:
-        print(f"Error syncing commands: {e}")
-
+    # Sync commands with retry
+    for attempt in range(3):
+        try:
+            bot.tree.copy_global_to(guild=discord.Object(id=YOUR_SERVER_ID))
+            synced = await bot.tree.sync(guild=discord.Object(id=YOUR_SERVER_ID))
+            print(f"Synced {len(synced)} commands")
+            break
+        except Exception as e:
+            print(f"⚠️ Sync failed (attempt {attempt + 1}): {e}")
+            await asyncio.sleep(5)
+    
+    # Initialize systems
+    bot.cooldowns.clear_expired_cooldowns()
     bot.add_view(PortfolioView())
+    
+    # Start background tasks
+    async def update_task():
+        while True:
+            await asyncio.sleep(3600)  # Hourly checks
+            if await bot.updater.hard_reset() and LOG_CHANNEL_ID:
+                channel = bot.get_channel(LOG_CHANNEL_ID)
+                if channel:
+                    await channel.send(
+                        f"⏩ Auto-updated at "
+                        f"{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
+                    )
+    
+    bot.loop.create_task(update_task())
 
-# ... [Keep all other existing commands and bot.run()] ...
-
-bot.run(os.getenv('DISCORD_TOKEN'))
+# Start the bot
+if __name__ == "__main__":
+    try:
+        bot.run(os.getenv('DISCORD_TOKEN'))
+    finally:
+        print("🛑 Bot process terminated")
