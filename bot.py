@@ -2,20 +2,27 @@ import discord
 from discord.ext import commands
 from discord.ui import Button, View, Modal, TextInput
 import os
-from dotenv import load_dotenv  # Add this import
+from dotenv import load_dotenv
+from datetime import datetime, timedelta
+import asyncio
 
 # Load environment variables
-load_dotenv()  # Add this line
+load_dotenv()
 
 intents = discord.Intents.default()
 intents.messages = True
 intents.message_content = True
+intents.guilds = True
+intents.members = True
 
 bot = commands.Bot(command_prefix="!", intents=intents)
 
+# Cooldown tracker
+bot.user_cooldowns = {}  # Format: {user_id: {"last_submit": timestamp, "thread_id": thread_id}}
+
 # Get values from environment variables
-PORTFOLIO_FORUM_CHANNEL_ID = int(os.getenv('CHANNEL_ID'))  # Updated
-YOUR_SERVER_ID = int(os.getenv('SERVER_ID'))  # Updated
+PORTFOLIO_FORUM_CHANNEL_ID = int(os.getenv('CHANNEL_ID'))
+YOUR_SERVER_ID = int(os.getenv('SERVER_ID'))
 
 class PortfolioForm(Modal, title="Submit Your Portfolio"):
     portfolio_url = TextInput(
@@ -50,6 +57,17 @@ class PortfolioForm(Modal, title="Submit Your Portfolio"):
     )
     
     async def on_submit(self, interaction: discord.Interaction):
+        # Check cooldown
+        now = datetime.now()
+        user_data = bot.user_cooldowns.get(interaction.user.id, {})
+        
+        if user_data and (now - user_data["last_submit"]).total_seconds() < 300:  # 5 minutes
+            remaining = 300 - (now - user_data["last_submit"]).total_seconds()
+            return await interaction.response.send_message(
+                f"⏳ Please wait {int(remaining // 60)}m {int(remaining % 60)}s before updating your portfolio again!",
+                ephemeral=True
+            )
+
         embed = discord.Embed(
             title=f"{interaction.user.display_name}'s Portfolio",
             color=discord.Color.blue()
@@ -67,18 +85,41 @@ class PortfolioForm(Modal, title="Submit Your Portfolio"):
         
         forum_channel = bot.get_channel(PORTFOLIO_FORUM_CHANNEL_ID)
         if not forum_channel:
-            await interaction.response.send_message("❌ Error: Forum channel not found!", ephemeral=True)
-            return
-        
+            return await interaction.response.send_message("❌ Error: Forum channel not found!", ephemeral=True)
+
+        # Delete old thread if exists
+        if user_data and "thread_id" in user_data:
+            try:
+                old_thread = await forum_channel.fetch_thread(user_data["thread_id"])
+                await old_thread.delete()
+            except:
+                pass  # Thread already deleted or not found
+
+        # Create new thread
         thread = await forum_channel.create_thread(
             name=f"{interaction.user.display_name}'s Portfolio",
             embed=embed
         )
-        
+
+        # Update cooldown tracker
+        bot.user_cooldowns[interaction.user.id] = {
+            "last_submit": now,
+            "thread_id": thread.thread.id
+        }
+
         await interaction.response.send_message(
-            f"✅ Portfolio created! Check it here: {thread.thread.jump_url}",
+            f"✅ Portfolio {'updated' if user_data else 'created'}! {thread.thread.jump_url}",
             ephemeral=True
         )
+
+        # Schedule cooldown cleanup
+        await self._schedule_cooldown_clear(interaction.user.id)
+
+    async def _schedule_cooldown_clear(self, user_id):
+        """Automatically clear cooldown after 5 minutes"""
+        await asyncio.sleep(300)
+        if user_id in bot.user_cooldowns:
+            del bot.user_cooldowns[user_id]
 
 class PortfolioView(View):
     def __init__(self):
@@ -95,7 +136,6 @@ class PortfolioView(View):
 async def on_ready():
     await bot.wait_until_ready()
     try:
-        # Sync commands to specific guild
         bot.tree.copy_global_to(guild=discord.Object(id=YOUR_SERVER_ID))
         synced = await bot.tree.sync(guild=discord.Object(id=YOUR_SERVER_ID))
         print(f"✅ Synced {len(synced)} commands")
@@ -133,5 +173,23 @@ async def create_portfolio_post(interaction: discord.Interaction):
         ephemeral=True
     )
 
-# Get token from environment variable
-bot.run(os.getenv('DISCORD_TOKEN'))  # Updated
+@bot.tree.command(
+    name="portfolio_cooldown",
+    description="Check your portfolio update cooldown status",
+    guild=discord.Object(id=YOUR_SERVER_ID))
+async def check_cooldown(interaction: discord.Interaction):
+    user_data = bot.user_cooldowns.get(interaction.user.id, {})
+    
+    if not user_data:
+        await interaction.response.send_message("🟢 You can submit a portfolio now!", ephemeral=True)
+    else:
+        remaining = 300 - (datetime.now() - user_data["last_submit"]).total_seconds()
+        if remaining > 0:
+            await interaction.response.send_message(
+                f"⏳ You can update your portfolio in {int(remaining // 60)}m {int(remaining % 60)}s",
+                ephemeral=True
+            )
+        else:
+            await interaction.response.send_message("🟢 You can update your portfolio now!", ephemeral=True)
+
+bot.run(os.getenv('DISCORD_TOKEN'))
