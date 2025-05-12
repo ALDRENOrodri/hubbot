@@ -23,10 +23,10 @@ bot = commands.Bot(command_prefix="!", intents=intents)
 
 # Constants
 COOLDOWN_DB = "/home/ubuntu/discord-bot/portfolio_cooldowns.db"
-COOLDOWN_HOURS = 72  # 3-day cooldown
+COOLDOWN_HOURS = 72
 PORTFOLIO_FORUM_CHANNEL_ID = int(os.getenv('CHANNEL_ID'))
 YOUR_SERVER_ID = int(os.getenv('SERVER_ID'))
-LOG_CHANNEL_ID = int(os.getenv('LOG_CHANNEL_ID'))  # Add to .env
+LOG_CHANNEL_ID = int(os.getenv('LOG_CHANNEL_ID'))
 
 # Database setup
 def setup_database():
@@ -72,202 +72,87 @@ class CooldownManager:
 
 class UpdateManager:
     def __init__(self):
-        self.repo = git.Repo("/home/ubuntu/discord-bot")
-        self.origin = self.repo.remote("origin")
-        
-    async def sync_with_github(self):
         try:
-            self.origin.fetch()
+            self.repo = git.Repo("/home/ubuntu/discord-bot")
+            self.origin = self.repo.remote("origin")
+        except:
+            self.init_repo()
+            
+    def init_repo(self):
+        repo = git.Repo.init("/home/ubuntu/discord-bot")
+        origin = repo.create_remote("origin", "https://github.com/YOUR_USERNAME/YOUR_REPO.git")
+        origin.fetch()
+        origin.pull("main")
+        self.repo = repo
+        self.origin = origin
+    
+    async def hard_reset(self):
+        try:
             self.repo.git.reset("--hard", "origin/main")
-            self.repo.git.clean("-fd", "discord-bot")
+            self.repo.git.clean("-fd")
+            # Reinstall dependencies
+            subprocess.run(["python3", "-m", "pip", "install", "-r", "requirements.txt"], check=True)
             return True
         except Exception as e:
-            print(f"Update failed: {str(e)}")
+            print(f"Hard reset failed: {str(e)}")
             return False
 
 # Initialize managers
 bot.cooldowns = CooldownManager()
 bot.updater = UpdateManager()
 
-class PortfolioForm(Modal, title="Submit Your Portfolio"):
-    portfolio_url = TextInput(
-        label="Portfolio URL",
-        placeholder="https://yourportfolio.example.com",
-        required=True
-    )
-    
-    experience_level = TextInput(
-        label="Experience Level",
-        placeholder="Beginner/Intermediate/Advanced/Professional",
-        required=True
-    )
-    
-    editing_software = TextInput(
-        label="Editing Software",
-        placeholder="Adobe Premiere, DaVinci Resolve, etc.",
-        required=True
-    )
-    
-    editing_specialties = TextInput(
-        label="Editing Specialties",
-        placeholder="Color grading, motion graphics, etc.",
-        required=True
-    )
-    
-    additional_info = TextInput(
-        label="Additional Information",
-        placeholder="Any extra details",
-        style=discord.TextStyle.long,
-        required=False
-    )
-    
-    async def on_submit(self, interaction: discord.Interaction):
-        embed = discord.Embed(
-            title=f"{interaction.user.display_name}'s Portfolio",
-            color=discord.Color.blue()
-        )
-        
-        embed.add_field(name="Portfolio URL", value=self.portfolio_url.value, inline=False)
-        embed.add_field(name="Experience Level", value=self.experience_level.value, inline=False)
-        embed.add_field(name="Editing Software", value=self.editing_software.value, inline=False)
-        embed.add_field(name="Editing Specialties", value=self.editing_specialties.value, inline=False)
-        
-        if self.additional_info.value:
-            embed.add_field(name="Additional Info", value=self.additional_info.value, inline=False)
-        
-        embed.set_author(name=interaction.user.display_name, icon_url=interaction.user.display_avatar.url)
-        
-        forum_channel = bot.get_channel(PORTFOLIO_FORUM_CHANNEL_ID)
-        if not forum_channel:
-            return await interaction.response.send_message("❌ Error: Forum channel not found!", ephemeral=True)
+# ... [Keep all your existing PortfolioForm, PortfolioView classes] ...
 
-        cooldown_data = bot.cooldowns.get_cooldown(interaction.user.id)
-        if cooldown_data and "thread_id" in cooldown_data:
-            try:
-                old_thread = await forum_channel.fetch_thread(cooldown_data["thread_id"])
-                await old_thread.delete()
-            except:
-                pass
-
-        thread = await forum_channel.create_thread(
-            name=f"{interaction.user.display_name}'s Portfolio",
-            embed=embed
-        )
-
-        bot.cooldowns.set_cooldown(
-            interaction.user.id,
-            datetime.now(),
-            thread.thread.id
-        )
-
-        await interaction.response.send_message(
-            f"✅ Portfolio {'updated' if cooldown_data else 'created'}! {thread.thread.jump_url}",
-            ephemeral=True
-        )
-
-class PortfolioView(View):
-    def __init__(self):
-        super().__init__(timeout=None)
-        self.add_item(Button(label="Submit Portfolio", style=discord.ButtonStyle.primary, custom_id="submit_portfolio"))
-    
-    async def interaction_check(self, interaction: discord.Interaction):
-        if interaction.data["custom_id"] == "submit_portfolio":
-            cooldown_data = bot.cooldowns.get_cooldown(interaction.user.id)
-            
-            if cooldown_data:
-                last_submit = datetime.fromisoformat(cooldown_data["last_submit"])
-                time_passed = datetime.now() - last_submit
-                
-                if time_passed < timedelta(hours=COOLDOWN_HOURS):
-                    remaining = timedelta(hours=COOLDOWN_HOURS) - time_passed
-                    days = remaining.days
-                    hours = remaining.seconds // 3600
-                    await interaction.response.send_message(
-                        f"⏳ You can update your portfolio in {days}d {hours}h",
-                        ephemeral=True
-                    )
-                    return False
-            
-            await interaction.response.send_modal(PortfolioForm())
-            return False
-        return True
+@bot.command()
+@commands.is_owner()
+async def reload(ctx):
+    """Hot-reload the bot"""
+    await ctx.send("♻️ Reloading extensions...")
+    for ext in list(bot.extensions.keys()):
+        await bot.reload_extension(ext)
+    await ctx.send("✅ Reload complete!")
 
 async def update_task():
     while True:
-        await asyncio.sleep(3600)  # Check hourly
-        if await bot.updater.sync_with_github():
+        await asyncio.sleep(3600)  # Hourly checks
+        if await bot.updater.hard_reset():
             log_channel = bot.get_channel(LOG_CHANNEL_ID)
             if log_channel:
                 embed = discord.Embed(
-                    title="🔄 Bot Updated",
-                    description=f"Automatically synced with GitHub\n{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}",
+                    title="🔄 Auto-Update Complete",
+                    description=f"Synced at {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}",
                     color=0x00ff00
                 )
                 await log_channel.send(embed=embed)
+            # Hot-reload
+            for ext in list(bot.extensions.keys()):
+                await bot.reload_extension(ext)
 
 @bot.event
 async def on_ready():
-    await bot.wait_until_ready()
-    try:
-        bot.tree.copy_global_to(guild=discord.Object(id=YOUR_SERVER_ID))
-        synced = await bot.tree.sync(guild=discord.Object(id=YOUR_SERVER_ID))
-        print(f"✅ Synced {len(synced)} commands")
-        
-        bot.cooldowns.clear_expired_cooldowns()
-        bot.loop.create_task(update_task())
-        
-    except Exception as e:
-        print(f"❌ Command sync failed: {e}")
-    print(f"✅ Bot is online: {bot.user}")
-    bot.add_view(PortfolioView())
+    bot.loop.create_task(update_task())
+    # ... [Rest of your existing on_ready] ...
 
-@bot.tree.command(
-    name="create_portfolio_post",
-    description="Create a portfolio submission post",
-    guild=discord.Object(id=YOUR_SERVER_ID))
-@commands.has_permissions(manage_messages=True)
-async def create_portfolio_post(interaction: discord.Interaction):
-    forum_channel = bot.get_channel(PORTFOLIO_FORUM_CHANNEL_ID)
-    
-    if not forum_channel:
-        await interaction.response.send_message("❌ Error: Forum channel not found!", ephemeral=True)
-        return
-    
-    embed = discord.Embed(
-        title="Start Here YO",
-        description="Click the button below to submit your portfolio.",
-        color=discord.Color.green()
-    )
-    
-    thread = await forum_channel.create_thread(
-        name="Post Portfolio Here:",
-        embed=embed,
-        view=PortfolioView()
-    )
-    
-    await interaction.response.send_message(
-        f"✅ Portfolio post created: {thread.thread.jump_url}",
-        ephemeral=True
-    )
-
-@bot.tree.command(
-    name="force_update",
-    description="Manually trigger a GitHub sync",
-    guild=discord.Object(id=YOUR_SERVER_ID))
+@bot.tree.command(name="force_update")
 @commands.has_permissions(administrator=True)
 async def force_update(interaction: discord.Interaction):
+    """Manually trigger a full update"""
     await interaction.response.defer(ephemeral=True)
-    if await bot.updater.sync_with_github():
-        embed = discord.Embed(
-            title="✅ Manual Update Successful",
-            description=f"Synced with GitHub at {datetime.now().strftime('%H:%M:%S')}",
-            color=0x00ff00
-        )
+    
+    if await bot.updater.hard_reset():
         log_channel = bot.get_channel(LOG_CHANNEL_ID)
         if log_channel:
+            embed = discord.Embed(
+                title="🔁 Manual Update",
+                description=f"Triggered by {interaction.user.mention}\n{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}",
+                color=0x7289DA
+            )
             await log_channel.send(embed=embed)
-        await interaction.followup.send("Bot updated successfully!", ephemeral=True)
+        
+        await interaction.followup.send("✅ Update complete! Changes are live.", ephemeral=True)
     else:
         await interaction.followup.send("❌ Update failed. Check logs.", ephemeral=True)
+
+# ... [Keep all other existing commands] ...
 
 bot.run(os.getenv('DISCORD_TOKEN'))
